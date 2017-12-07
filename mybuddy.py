@@ -10,13 +10,13 @@ import time
 import pystray
 import tvdb_api
 from PIL import Image
-from PyPDF2 import PdfFileReader, PdfFileMerger
 from watchdog.events import PatternMatchingEventHandler
 from watchdog.observers import Observer
 
 EXIT_YES = 3
 EXIT_NO = 5
 CACHE = set()
+DIR_CACHE = collections.deque([], maxlen=5)
 
 def main(icon):
 	icon.visible = True
@@ -26,11 +26,12 @@ def main(icon):
 			observer.stop()
 		observer = Observer()
 		drive = os.getenv("SYSTEMDRIVE") + "\\"
-		watchdogs = [MediaWatchDog(), TextWatchDog()]
-		observer.schedule(watchdogs[0], path=drive, recursive=True)
-		observer.schedule(watchdogs[1], path=drive, recursive=True)
+		watchdogs = [MediaWatchDog()]
+		for watchdog in watchdogs:
+			observer.schedule(watchdog, path=drive, recursive=True)
 		observer.start()
 		print("Program Initialized")
+		print("DIR CACHE:", DIR_CACHE)
 		while icon.visible and not exists_data(watchdogs):
 			time.sleep(1)
 
@@ -40,10 +41,9 @@ class MediaWatchDog(PatternMatchingEventHandler):
 	def __init__(self, size=3, data_file='userdata.txt', *args):
 		PatternMatchingEventHandler.__init__(self, *args)
 		self.size = size
-		self.user_data_file = APP_DATA_PATH + "\\" + data_file
+		self.user_data_file = os.path.join(APP_DATA_PATH, data_file)
 		self.event_stack = collections.deque([], maxlen=size)
 		self.undo_buffer = collections.deque([], maxlen=size)
-		self.dir_cache = collections.deque([], maxlen=size)
 
 	def get_data(self):
 		if len(self.event_stack) == self.size:
@@ -57,7 +57,7 @@ class MediaWatchDog(PatternMatchingEventHandler):
 		if not event.is_directory and not event.dest_path in CACHE:
 			last_path = None
 			current_path = os.path.abspath(os.path.dirname(event.src_path))
-			if current_path in self.dir_cache:
+			if current_path in DIR_CACHE:
 				pass
 			if self.event_stack:
 				last_path = os.path.abspath(os.path.dirname(self.event_stack[-1].src_path))
@@ -68,14 +68,16 @@ class MediaWatchDog(PatternMatchingEventHandler):
 					self.event_stack.append(event)
 			else:
 				self.event_stack.append(event)
-			print("MediaWatchDog ocurred")
+			print("MediaWatchDog on_moved ocurred")
 			print("Source:", event.src_path)
 			print("Dest:", event.dest_path)
 
 	def process(self, data):
 		print("Data received:", data)
 		target_path = os.path.abspath(os.path.dirname(data[-1].src_path))
-		files = set(os.listdir(target_path))
+		files = list(filter(lambda file: os.path.isfile(os.path.join(target_path, file)), os.listdir(target_path)))
+		files = set(filter(lambda file: matches_pattern(self.patterns, file), files))
+		print(files)
 		exclusions = set([item.dest_path.split("\\")[-1] for item in data])
 		files = list(files - exclusions - CACHE)
 		if not files:
@@ -105,8 +107,8 @@ class MediaWatchDog(PatternMatchingEventHandler):
 		for file in files:
 			try:
 				new_file_name = get_new_show_filename(file)
-				new_file_path = "{0}\\{1}".format(target_path, new_file_name)
-				old_file_path = "{0}\\{1}".format(target_path, file)
+				new_file_path = os.path.join(target_path, new_file_name)
+				old_file_path = os.path.join(target_path, file)
 				os.rename(old_file_path, new_file_path)
 				undo_data[new_file_path] = old_file_path
 				CACHE.add(new_file_name)
@@ -139,17 +141,26 @@ class MediaWatchDog(PatternMatchingEventHandler):
 				user_data.write(" " + text + "\n")
 		prompt = subprocess.call(('".\\assets\\undo\\undo.exe"'))
 		if prompt == EXIT_NO:
-			self.dir_cache.append(target_path)
+			DIR_CACHE.append(target_path)
 			print("Target path cached:", target_path)
+			#self.event_stack.clear()
 			return True
 		data = self.undo_buffer.pop()
+		files_to_undo = []
+		with open(self.user_data_file, 'w+') as user_data:
+			for file in target_files:
+				files_to_undo.append(file)
+		print("Files to undo:", files_to_undo)
 		for key in data:
 			try:
-				os.rename(key, undo_data[key])
-				pass
+				temp = key
+				if temp in files_to_undo:
+					os.rename(key, undo_data[key])
+					pass
 			except Exception as e:
 				print(e)
 				pass
+		#self.event_stack.clear()
 		return True
 
 class TextWatchDog(PatternMatchingEventHandler):
@@ -158,7 +169,7 @@ class TextWatchDog(PatternMatchingEventHandler):
 	def __init__(self, size=6, data_file='userdata.txt', *args):
 		PatternMatchingEventHandler.__init__(self, *args)
 		self.size = size
-		self.user_data_file = APP_DATA_PATH + "\\" + data_file
+		self.user_data_file = os.path.join(APP_DATA_PATH, data_file)
 		self.event_stack = collections.deque([], maxlen=size)
 		self.undo_buffer = collections.deque([], maxlen=size)
 
@@ -166,7 +177,9 @@ class TextWatchDog(PatternMatchingEventHandler):
 		if len(self.event_stack) == self.size:
 			data = copy.copy(self.event_stack)
 			self.event_stack.clear()
-			return self.process(data)
+			ret = self.process(data)
+			self.event_stack.clear()
+			return ret
 		return
 
 	# Don't make calls on event threads
@@ -181,7 +194,7 @@ class TextWatchDog(PatternMatchingEventHandler):
 					self.event_stack.append(event)
 			else:
 				self.event_stack.append(event)
-			print("TextWatchDog ocurred")
+			print("TextWatchDog occurred")
 			print("Source:", event.src_path)
 
 	def process(self, data):
@@ -194,6 +207,15 @@ class Show():
 		self.name = name
 		self.season = season
 		self.episode = episode
+
+def matches_pattern(patterns, file):
+	for pattern in patterns:
+		if fnmatch.fnmatch(file, pattern):
+			return True
+	return False
+
+def is_file(path, file):
+	return os.path.isfile(os.path.join(path, file))
 
 def exists_data(watchdogs):
 	for watchdog in watchdogs:
@@ -214,7 +236,8 @@ def get_episode_name(name, s, e):
 	database = tvdb_api.Tvdb()
 	data = None
 	try:
-		data = database[name][int(s)][int(e)]
+		show = database[name]
+		data = show[int(s)][int(e)]
 	except Exception as e:
 		print(e)
 		Exception("Data for show {} not found".format(name))
@@ -293,7 +316,8 @@ if __name__ == "__main__":
 		)
 	ICON.icon = Image.open(".\\assets\\tray.ico")
 	ICON.title = "My Buddy"
-	APP_DATA_PATH = os.environ["APPDATA"] + "\\" + "MyBuddy"
+	APP_DATA_PATH = os.path.join(os.environ["APPDATA"], "MyBuddy")
+	print(APP_DATA_PATH)
 	if not os.path.exists(APP_DATA_PATH):
 		os.mkdir(APP_DATA_PATH)
 	try:
