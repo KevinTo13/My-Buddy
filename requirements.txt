@@ -1,3 +1,4 @@
+PyPDF2==1.26.0
 pystray==0.14.3
 tvdb-api==2.0
 watchdog==0.8.3

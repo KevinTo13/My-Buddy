@@ -5,6 +5,7 @@ My Buddy is an application used to automate repetitive actions performed by the 
 
 ### Requirements
 
+> - Windows
 > - Python 3.0+
 
 ### Running our application
