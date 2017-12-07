@@ -1,5 +1,6 @@
 import collections
 import copy
+import fnmatch
 import math
 import os
 import re
@@ -9,62 +10,95 @@ import time
 import pystray
 import tvdb_api
 from PIL import Image
+from PyPDF2 import PdfFileReader, PdfFileMerger
 from watchdog.events import PatternMatchingEventHandler
 from watchdog.observers import Observer
 
 EXIT_YES = 3
 EXIT_NO = 5
 CACHE = set()
-UNDO_BUFFER = collections.deque([], maxlen=10)
 
 def main(icon):
-	global CACHE
 	icon.visible = True
-	watchdog = None
 	observer = None
 	while icon.visible:
 		if observer:
 			observer.stop()
-		watchdog = WatchDog()
 		observer = Observer()
 		drive = os.getenv("SYSTEMDRIVE") + "\\"
-		observer.schedule(watchdog, path=drive, recursive=True)
+		watchdogs = [MediaWatchDog(), TextWatchDog()]
+		observer.schedule(watchdogs[0], path=drive, recursive=True)
+		observer.schedule(watchdogs[1], path=drive, recursive=True)
 		observer.start()
 		print("Program Initialized")
-		data = None
-		while icon.visible and not data:
-			data = watchdog.get_data()
+		while icon.visible and not exists_data(watchdogs):
 			time.sleep(1)
-		if not icon.visible:
-			return
+
+class MediaWatchDog(PatternMatchingEventHandler):
+	patterns = ["*.mp4", "*.avi", "*.mkv", "*.flv", "*.wmv"]
+
+	def __init__(self, size=3, data_file='userdata.txt', *args):
+		PatternMatchingEventHandler.__init__(self, *args)
+		self.size = size
+		self.user_data_file = APP_DATA_PATH + "\\" + data_file
+		self.event_stack = collections.deque([], maxlen=size)
+		self.undo_buffer = collections.deque([], maxlen=size)
+		self.dir_cache = collections.deque([], maxlen=size)
+
+	def get_data(self):
+		if len(self.event_stack) == self.size:
+			data = copy.copy(self.event_stack)
+			self.event_stack.clear()
+			return self.process(data)
+		return
+
+	# Don't make calls on event threads
+	def on_moved(self, event):
+		if not event.is_directory and not event.dest_path in CACHE:
+			last_path = None
+			current_path = os.path.abspath(os.path.dirname(event.src_path))
+			if current_path in self.dir_cache:
+				pass
+			if self.event_stack:
+				last_path = os.path.abspath(os.path.dirname(self.event_stack[-1].src_path))
+				if last_path == current_path:
+					self.event_stack.append(event)
+				else:
+					self.event_stack.clear()
+					self.event_stack.append(event)
+			else:
+				self.event_stack.append(event)
+			print("MediaWatchDog ocurred")
+			print("Source:", event.src_path)
+			print("Dest:", event.dest_path)
+
+	def process(self, data):
 		print("Data received:", data)
 		target_path = os.path.abspath(os.path.dirname(data[-1].src_path))
 		files = set(os.listdir(target_path))
 		exclusions = set([item.dest_path.split("\\")[-1] for item in data])
 		files = list(files - exclusions - CACHE)
 		if not files:
-			continue
+			return
 		files.sort()
-		user_data_file = APP_DATA_PATH + "\\" + "userdata.txt"
-		with open(user_data_file, 'w+') as user_data:
+		with open(self.user_data_file, 'w+') as user_data:
 			for file in files:
 				user_data.write(file + "\n")
 		# Prompt asking if you want to continue
 		prompt = subprocess.call(('".\\assets\\rename\\rename.exe"'))
 		if prompt == EXIT_NO:
-			continue
+			return
+
 		files = []
-		with open(user_data_file, 'r') as user_data:
+		with open(self.user_data_file, 'r') as user_data:
 			for line in user_data:
 				files.append(line.strip())
 		print("Files from prompt:", files)
 		# {newfilename:oldfilename}
 		undo_data = {}
-		print(files)
 		# Path that you are working on
 		size = len(files)
 		count = 0
-		percentage = None
 		# Loading bar prompt
 		load_status = subprocess.Popen([".\\assets\\load\\load.exe"])
 		time.sleep(1)
@@ -82,33 +116,33 @@ def main(icon):
 				pass
 			count += 1
 			percentage = min(math.floor(count / size * 100), 99)
-			with open(user_data_file, 'w+') as user_data:
+			with open(self.user_data_file, 'w+') as user_data:
 				user_data.write(str(percentage))
-			time.sleep(0.1)
-		with open(user_data_file, 'w+') as user_data:
+			time.sleep(0.5)
+		with open(self.user_data_file, 'w+') as user_data:
 			user_data.write("99")
-		time.sleep(0.1)
-		with open(user_data_file, 'w+') as user_data:
+		time.sleep(0.5)
+		with open(self.user_data_file, 'w+') as user_data:
 			user_data.write("100")
 		print("LOAD STATUS", load_status.poll())
 		# Verify that the load window has properly terminated
 		while not load_status.poll():
 			time.sleep(1)
-		global UNDO_BUFFER
-		UNDO_BUFFER.append(undo_data)
+		self.undo_buffer.append(undo_data)
 		# Pipe this to the prompt
 		target_files = list(undo_data.keys())
 		target_files.sort()
 		print(target_files)
-		with open(user_data_file, 'w+') as user_data:
+		with open(self.user_data_file, 'w+') as user_data:
 			for file in target_files:
 				text = file.split("\\")[-1]
 				user_data.write(" " + text + "\n")
 		prompt = subprocess.call(('".\\assets\\undo\\undo.exe"'))
 		if prompt == EXIT_NO:
-			continue
-		files = os.listdir(target_path)
-		data = UNDO_BUFFER.pop()
+			self.dir_cache.append(target_path)
+			print("Target path cached:", target_path)
+			return True
+		data = self.undo_buffer.pop()
 		for key in data:
 			try:
 				os.rename(key, undo_data[key])
@@ -116,38 +150,44 @@ def main(icon):
 			except Exception as e:
 				print(e)
 				pass
+		return True
 
-class WatchDog(PatternMatchingEventHandler):
-	patterns = ["*.mp4", "*.avi", "*.mkv", "*.flv", "*.wmv"]
+class TextWatchDog(PatternMatchingEventHandler):
+	patterns = ["*.txt"]
 
-	def __init__(self, size=3, *args):
+	def __init__(self, size=6, data_file='userdata.txt', *args):
 		PatternMatchingEventHandler.__init__(self, *args)
 		self.size = size
+		self.user_data_file = APP_DATA_PATH + "\\" + data_file
 		self.event_stack = collections.deque([], maxlen=size)
+		self.undo_buffer = collections.deque([], maxlen=size)
 
 	def get_data(self):
 		if len(self.event_stack) == self.size:
 			data = copy.copy(self.event_stack)
 			self.event_stack.clear()
-			return data
+			return self.process(data)
 		return
 
-	def on_moved(self, event):
-		if not event.is_directory and not event.dest_path in CACHE:
-			last_path = None
-			current_path = os.path.abspath(os.path.dirname(event.src_path))
+	# Don't make calls on event threads
+	def on_modified(self, event):
+		if not event.is_directory:
 			if self.event_stack:
-				last_path = os.path.abspath(os.path.dirname(self.event_stack[-1].src_path))
-				if last_path == current_path:
+				last_path = self.event_stack[-1].src_path
+				if event.src_path == last_path:
 					self.event_stack.append(event)
 				else:
 					self.event_stack.clear()
 					self.event_stack.append(event)
 			else:
 				self.event_stack.append(event)
-			print("Event ocurred")
+			print("TextWatchDog ocurred")
 			print("Source:", event.src_path)
-			print("Dest:", event.dest_path)
+
+	def process(self, data):
+		print("Hmm")
+		print(self.event_stack)
+		return True
 
 class Show():
 	def __init__(self, name, season, episode):
@@ -155,13 +195,28 @@ class Show():
 		self.season = season
 		self.episode = episode
 
+def exists_data(watchdogs):
+	for watchdog in watchdogs:
+		data = watchdog.get_data()
+		if data:
+			return True
+	return False
+
+def get_pdf_title(pdf_file_path):
+	try:
+		pdf_reader = PdfFileReader(open(pdf_file_path, "rb"))
+		return pdf_reader.getDocumentInfo()['/Title']
+	except Exception as e:
+		print(e)
+		pass
+
 def get_episode_name(name, s, e):
 	database = tvdb_api.Tvdb()
 	data = None
 	try:
 		data = database[name][int(s)][int(e)]
-	except Exception as ex:
-		print(ex)
+	except Exception as e:
+		print(e)
 		Exception("Data for show {} not found".format(name))
 	return data['episodename']
 
