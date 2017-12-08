@@ -96,6 +96,8 @@ class MediaWatchDog(PatternMatchingEventHandler):
 			for line in user_data:
 				files.append(line.strip())
 		print("Files from prompt:", files)
+		if not files:
+			return
 		# {newfilename:oldfilename}
 		undo_data = {}
 		# Path that you are working on
@@ -147,9 +149,9 @@ class MediaWatchDog(PatternMatchingEventHandler):
 			return True
 		data = self.undo_buffer.pop()
 		files_to_undo = []
-		with open(self.user_data_file, 'w+') as user_data:
-			for file in target_files:
-				files_to_undo.append(file)
+		with open(self.user_data_file, 'r') as user_data:
+			for line in user_data:
+				files_to_undo.append(target_path + "\\" + line.strip())
 		print("Files to undo:", files_to_undo)
 		for key in data:
 			try:
